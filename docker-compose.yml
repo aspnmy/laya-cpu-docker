@@ -1,0 +1,43 @@
+# laya CPU-only
+#
+# 启动：docker compose -f docker-compose.yml up -d
+services:
+  laya-cpu:
+    image: ghcr.io/aspnmy/laya-cpu:0.4.31-165
+    container_name: laya-cpu
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      LAYA_DEVICE: cpu
+      # 三个 checkpoint 已烘焙在镜像内，直接列名即可
+      LAYA_MODELS: english,multilingual,typed-decisions
+      LAYA_PRELOAD: "1"
+      # 按 questions 的 id 集合识别 typed-decisions workflow（集合须完全相等）
+      LAYA_AUTO_TASK: "1"
+      # 用 AUTO_TASK=1 时必须 >=3，否则每次切换都会卸载重载
+      LAYA_MAX_LOADED: "3"
+      LAYA_THREADS: "8"
+      OMP_NUM_THREADS: "8"
+      MALLOC_ARENA_MAX: "2"
+      LAYA_HOST: 0.0.0.0
+      LAYA_PORT: "8000"
+      HF_HOME: /models
+      HF_HUB_OFFLINE: "1"
+    # 无 volumes：镜像自带权重
+    deploy:
+      resources:
+        limits:
+          # 三 checkpoint 权重 2.3 GB，加载峰值 RSS 约 4-5 GB
+          memory: 8g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 240s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
