@@ -1,0 +1,62 @@
+# Laya slim 镜像 —— 多阶段构建（squash 到全新基础镜像）
+#
+# 目的：laya-cuda:0.4.31 报 9.35GB，但容器内实测仅 5.5GB。原因是该镜像由 9 层叠加而来，
+#      `docker images` 统计的是各层大小之和（含被后续层覆盖/删除的冗余），并非实际占用。
+#      在本容器里 rm 文件不会减小体积（层只增不减），必须把清理后的产物 COPY 到新基础镜像，
+#      新镜像的层只包含「实际存在的文件」。
+#
+# 做法：
+#   stage1 = laya-stage:clean（由清理后的工作容器 commit 而来，内含已删冗余的 venv）
+#   stage2 = 干净的 python:3.11-slim-trixie + COPY --from=stage1 所需目录
+#
+# 用法（在 10.168.3.123 上）：
+#   docker build -f Dockerfile.slim -t laya-cuda:0.4.31-slim .
+ARG BASE=python:3.11-slim-trixie
+ARG STAGE=laya-stage:clean
+
+FROM ${STAGE} AS payload
+
+FROM ${BASE}
+
+LABEL org.opencontainers.image.title="Laya (CUDA packed, CPU default) Jev-compatible server — slim" \
+      org.opencontainers.image.source="https://github.com/NandhaKishorM/laya" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.description="Multi-stage squash: only live files from the venv payload."
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    TORCH_DISABLE_NATIVE_JIT=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    USE_TF=0 \
+    USE_TORCH=1 \
+    TOKENIZERS_PARALLELISM=false \
+    OMP_NUM_THREADS=4 \
+    MALLOC_ARENA_MAX=2 \
+    LAYA_DEVICE=cpu \
+    LAYA_HOST=0.0.0.0 \
+    LAYA_PORT=8000 \
+    HF_HOME=/models \
+    HF_HUB_OFFLINE=1
+
+RUN groupadd --gid 10001 laya \
+    && useradd --uid 10001 --gid laya --create-home laya \
+    && mkdir -p /models && chown -R laya:laya /models
+
+# venv 是唯一的大件；只复制它，其它被删的冗余天然不会进新镜像。
+COPY --from=payload /opt/venv /opt/venv
+COPY --from=payload /opt/laya/entrypoint.py /opt/laya/entrypoint.py
+# 上游 Apache-2.0：LICENSE 必须随镜像分发。清理阶段误删过该文件，故改从构建上下文拷。
+COPY LICENSE /usr/share/doc/laya/LICENSE
+
+# 校验：venv 里的解释器可用、且 CUDA 栈文件在位（构建期失败比运行期崩更省事）
+RUN /opt/venv/bin/python -c "import torch; assert torch.version.cuda, 'torch is not a CUDA build'"
+
+USER laya
+WORKDIR /home/laya
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+  CMD python -c "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4).status==200 else 1)"
+
+ENTRYPOINT ["python", "/opt/laya/entrypoint.py"]
+CMD ["laya-serve"]
